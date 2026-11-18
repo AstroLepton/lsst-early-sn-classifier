@@ -1,0 +1,7 @@
+astropy
+lasair
+matplotlib
+numpy
+pandas
+pyarrow
+requests

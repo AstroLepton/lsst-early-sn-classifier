@@ -1,0 +1,17 @@
+data/
+models/
+literature/
+_unsorted/
+scripts/settings.py
+.venv/
+venv/
+__pycache__/
+.ipynb_checkpoints/
+.DS_Store
+*.aux
+*.log
+*.out
+*.synctex.gz
+*.fits
+*.fits.gz
+*.tar.bz2
