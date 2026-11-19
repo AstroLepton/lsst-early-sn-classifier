@@ -1,11 +1,13 @@
 '''
-Plot the light curve of one Lasair object
+Plot the light curve of one Lasair object.
 
 Set OBJECT_ID below, then run:
     python scripts/light_curves.py
 
-The points are the detections in diaSourcesList. Flux is in nanojansky;
-AB magnitude is -2.5 log10(flux) + 31.4. Brighter is up.
+Two figures are written. One is the full detection curve in AB magnitude.
+The other is the same object cut by truncate() at nights N = 0, 2 and 5,
+in flux, so the non-detections stay on the plot. Brighter is up on the
+magnitude figure. Flux is in nanojansky.
 '''
 
 import json  # read the saved object record
@@ -14,9 +16,12 @@ import matplotlib.pyplot as plt  # draw the plot
 import numpy as np  # log10 for the magnitude conversion
 import pandas as pd  # table of detections
 from paths import FIGS, INTERIM, RAW
+from truncate import truncate
 
-# Paste a diaObjectId here.
-OBJECT_ID = "170019696262250510"
+# Paste a diaObjectId here. This one is a TNS SN Ia with a rising light curve.
+OBJECT_ID = "170019717277810735"
+# Nights passed to truncate() for the comparison figure.
+TRUNCATE_NIGHTS = (0, 2, 5)
 
 # Colour used for each LSST filter. A band not listed gets a default blue.
 BAND_COLOR = {
@@ -117,10 +122,82 @@ def plot_lightcurve(df, object_id, classification):
     return fig
 
 
+def plot_truncated(object_id):
+    """One SN at nights 0, 2 and 5, from the shared Lasair light-curve table.
+
+    The time axis is days after the first detection, and it is the same on
+    every panel, out to the night-5 cut. A dashed line marks that panel's cut.
+    Filled points are detections. Hollow points are forced photometry.
+    Night 0 has no hollow points: truncate() drops them.
+    """
+    oid = int(object_id)
+    lc = pd.read_parquet(
+        INTERIM / "lightcurves_lasair.parquet",
+        filters=[("objectId", "in", [oid])],
+    )
+    if lc.empty:
+        raise SystemExit(f"{object_id} is not in lightcurves_lasair.parquet")
+    objects = pd.read_parquet(
+        INTERIM / "objects_lasair.parquet",
+        columns=["objectId", "trueClass"],
+        filters=[("objectId", "in", [oid])],
+    )
+    true_class = objects["trueClass"].iloc[0] if len(objects) else None
+    label = true_class if pd.notna(true_class) else "unlabelled"
+
+    t0 = lc.loc[lc["isDetection"], "mjd"].min()
+    # Same vertical scale on every panel, taken from the longest cut.
+    longest = truncate(lc, max(TRUNCATE_NIGHTS))
+    low = (longest["flux"] - longest["fluxErr"]).min()
+    high = (longest["flux"] + longest["fluxErr"]).max()
+    pad = 0.05 * (high - low) if high > low else 1.0
+    # A little space before the first detection, and just past the last cut.
+    x_right = max(TRUNCATE_NIGHTS) + 0.5
+
+    fig, axes = plt.subplots(1, len(TRUNCATE_NIGHTS), figsize=(12, 4), sharex=True, sharey=True)
+    for ax, n in zip(axes, TRUNCATE_NIGHTS):
+        part = truncate(lc, n).copy()
+        part["day"] = part["mjd"] - t0
+        # Nothing may land on or after the cut.
+        assert part["day"].max() < n + 0.5
+        if n < 1:
+            assert part["isDetection"].all()
+        for band, group in part.groupby("band", sort=True):
+            color = BAND_COLOR.get(str(band), "#1f77b4")
+            det = group[group["isDetection"]]
+            non = group[~group["isDetection"]]
+            ax.errorbar(non["day"], non["flux"], yerr=non["fluxErr"], fmt="o",
+                        mfc="none", ms=4, lw=0.6, capsize=1, color=color)
+            ax.errorbar(det["day"], det["flux"], yerr=det["fluxErr"], fmt="o",
+                        ms=4, lw=0.6, capsize=1, color=color, label=band)
+        ax.axvline(n + 0.5, color="k", ls="--", lw=0.8)
+        ax.axhline(0, color="k", lw=0.4)
+        n_det = int(part["isDetection"].sum())
+        n_forced = int((~part["isDetection"]).sum())
+        det_word = "detection" if n_det == 1 else "detections"
+        ax.set_title(f"N = {n}\n{n_det} {det_word}, {n_forced} forced")
+        ax.set_xlabel("days after first detection")
+        ax.grid(True, alpha=0.3)
+    axes[0].set_ylabel("flux (nJy)")
+    axes[0].set_xlim(-0.3, x_right + 0.3)
+    axes[0].set_ylim(low - pad, high + pad)
+    axes[-1].legend(title="band", frameon=False, fontsize=8)
+    fig.suptitle(f"{label}  {object_id}", y=1.02)
+    fig.tight_layout()
+
+    filename = FIGS / f"lightcurve_{object_id}_n0_n2_n5.png"
+    fig.savefig(filename, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved {filename.name}")
+    return filename
+
+
 def main():
     object_id = str(OBJECT_ID).strip()  # drop any accidental spaces
     if not object_id:
         raise SystemExit('Set OBJECT_ID at the top of light_curves.py, e.g. OBJECT_ID = "313756671828033555"')
+
+    plot_truncated(object_id)  # nights 0, 2 and 5, from the parquet table
 
     obj = load_object(object_id)  # JSON on disk, or a fresh download
     df = detections_table(obj)  # the points that get plotted

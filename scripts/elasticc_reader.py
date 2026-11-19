@@ -1,16 +1,20 @@
 '''
 Turn ELAsTiCC2 training files (HEAD + PHOT + DUMP) into the shared tables.
 
-Writes two Parquet files into OUT_DIR:
+Writes three Parquet files into the output folder:
 
-lightcurves.parquet  one row per photometry point
-objectId, mjd, band, flux, fluxErr, isDetection, trueClass
-objects.parquet      one row per object
-objectId, ebv, trueClass
+lightcurves_elasticc.parquet   one row per photometry point
+    objectId, mjd, band, flux, fluxErr, isDetection
+objects_elasticc.parquet       one row per object
+    objectId, ra, dec, host_sep, mwebv, trueClass
+redshifts_elasticc.parquet     one row per object, kept for a later redshift test
+    objectId, REDSHIFT_HELIO[_ERR], REDSHIFT_FINAL[_ERR],
+    HOSTGAL_PHOTOZ[_ERR], HOSTGAL_SPECZ[_ERR]
 
+The light-curve table has no class column. trueClass lives only on the object table.
 flux and fluxErr are in nanojansky, the same unit as Lasair psfFlux.
-Redshifts (REDSHIFT_*, HOSTGAL_*PHOTOZ, DUMP ZCMB/GALZPHOT) are not carried
-over, because real LSST alerts on Lasair have no host redshift yet.
+Only the columns listed above are written. A redshift cannot appear in the
+light-curve or object table, because those tables never read a redshift column.
 
 how to run (from the repo root)
     python scripts/elasticc_reader.py                     # every ELASTICC2_TRAIN_02_* folder in data/raw/elasticc2
@@ -35,10 +39,21 @@ DATA = RAW / "elasticc2"
 PREFIX = "ELASTICC2_TRAIN_02_"
 
 # FLUXCAL has zero point 27.5; Lasair nJy has 31.4.
-NJY_PER_FLUXCAL = 10 ** ((31.4 - 27.5) / 2.5)  # about 36.31
+# 10**((31.4-27.5)/2.5) = 36.3078..., written 36.308. Multiply once.
+NJY_PER_FLUXCAL = 10 ** ((31.4 - 27.5) / 2.5)
 DETECTION_BIT = 4096  # PHOTFLAG bit set when the point is a detection
 #1024 saturated, 2048 trigger, meaning the object's first detectio, 4096 detected, signal to noise above 5sigma
 END_OF_LIGHTCURVE_MJD = -777.0  # separator row between objects in PHOT
+HOSTLESS_SEP = -9.0  # HOSTGAL_SNSEP when SNANA has no host
+MISSING_REDSHIFT = -9.0  # A_FORMAT.TXT: -9 means this redshift was not measured
+
+# Fixed output columns. Anything not named here is not written.
+REDSHIFT_COLUMNS = [
+    "REDSHIFT_HELIO", "REDSHIFT_HELIO_ERR",
+    "REDSHIFT_FINAL", "REDSHIFT_FINAL_ERR",
+    "HOSTGAL_PHOTOZ", "HOSTGAL_PHOTOZ_ERR",
+    "HOSTGAL_SPECZ", "HOSTGAL_SPECZ_ERR",
+]
 
 # Column names and types of the light-curve table (one row per point).
 LIGHTCURVE_SCHEMA = pa.schema([
@@ -48,14 +63,20 @@ LIGHTCURVE_SCHEMA = pa.schema([
     ("flux", pa.float64()),
     ("fluxErr", pa.float64()),
     ("isDetection", pa.bool_()),
-    ("trueClass", pa.string()),
 ])
 # Column names and types of the object table (one row per object).
 OBJECT_SCHEMA = pa.schema([
     ("objectId", pa.int64()),
-    ("ebv", pa.float64()),
+    ("ra", pa.float64()),
+    ("dec", pa.float64()),
+    ("host_sep", pa.float64()),
+    ("mwebv", pa.float64()),
     ("trueClass", pa.string()),
 ])
+# Redshifts kept aside. Not read by the classifier tables.
+REDSHIFT_SCHEMA = pa.schema(
+    [("objectId", pa.int64())] + [(name, pa.float64()) for name in REDSHIFT_COLUMNS]
+)
 
 
 def read_dump(path):
@@ -92,17 +113,28 @@ def decode(column):
     return np.char.strip(array.astype(str))  # "39592588        " -> "39592588"
 
 
+def fluxcal_to_njy(fluxcal):
+    """FLUXCAL (zeropoint 27.5) to nanojansky (zeropoint 31.4). One multiply."""
+    return fluxcal * NJY_PER_FLUXCAL
+
+
 def read_pair(head_path, phot_path, true_class, gentype_by_cid):
-    """One HEAD/PHOT pair -> (light-curve DataFrame, object DataFrame)."""
-    # HEAD: one row per object. Only take the columns I need (no redshifts).
+    """One HEAD/PHOT pair -> (light curves, objects, redshifts)."""
+    # HEAD: one row per object. The written tables use a fixed column list.
     with fits.open(head_path) as hdul:
         head = hdul[1].data  # the table is in the 2nd part of the FITS file
         object_id = decode(head["SNID"]).astype(np.int64)
         ptr_min = native(head["PTROBS_MIN"]).astype(np.int64)  # first PHOT row of this object
         ptr_max = native(head["PTROBS_MAX"]).astype(np.int64)  # last PHOT row of this object
         nobs = native(head["NOBS"]).astype(np.int64)  # number of PHOT rows
-        ebv = native(head["MWEBV"]).astype(np.float64)  # Milky Way dust
+        ra = native(head["RA"]).astype(np.float64)
+        dec = native(head["DEC"]).astype(np.float64)
+        host_sep = native(head["HOSTGAL_SNSEP"]).astype(np.float64)
+        mwebv = native(head["MWEBV"]).astype(np.float64)  # Milky Way dust
         sim_type = native(head["SIM_TYPE_INDEX"]).astype(np.int64)  # true type number
+        redshifts = {
+            name: native(head[name]).astype(np.float64) for name in REDSHIFT_COLUMNS
+        }
 
     # The pointers and NOBS should describe the same rows.
     if not np.array_equal(ptr_max - ptr_min + 1, nobs):
@@ -140,24 +172,35 @@ def read_pair(head_path, phot_path, true_class, gentype_by_cid):
     keep = mjd != END_OF_LIGHTCURVE_MJD
     rows, owner = rows[keep], owner[keep]
 
-    # The light-curve table, in the shared format.
+    # SNANA writes the y filter as Y. Lasair writes y. The '-' band sits
+    # only on the -777 separator rows, which were dropped just above.
+    band = np.char.lower(band_all[rows])
+
+    # The light-curve table, in the shared format. No class column.
     lightcurves = pd.DataFrame({
         "objectId": object_id[owner],
         "mjd": mjd_all[rows],
-        # Lasair writes the LSST y filter in lower case.
-        "band": np.char.lower(band_all[rows]),
-        "flux": flux_all[rows] * NJY_PER_FLUXCAL,  # FLUXCAL -> nJy
-        "fluxErr": flux_err_all[rows] * NJY_PER_FLUXCAL,
+        "band": band,
+        "flux": fluxcal_to_njy(flux_all[rows]),
+        "fluxErr": fluxcal_to_njy(flux_err_all[rows]),
         "isDetection": (photflag_all[rows] & DETECTION_BIT) != 0,  # is the 4096 bit set?
-        "trueClass": true_class,  # same for every row, it comes from the folder name
     })
-    # The object table: one row per HEAD row.
+    # Hostless objects are stored as -9. A negative DEC is a real coordinate.
+    host_sep[host_sep == HOSTLESS_SEP] = np.nan
+    # The object table: one row per HEAD row. trueClass comes from the folder name.
     objects = pd.DataFrame({
         "objectId": object_id,
-        "ebv": ebv,
+        "ra": ra,
+        "dec": dec,
+        "host_sep": host_sep,
+        "mwebv": mwebv,
         "trueClass": true_class,
     })
-    return lightcurves, objects
+    # -9 means "not measured", not a redshift of -9.
+    for name in REDSHIFT_COLUMNS:
+        redshifts[name][redshifts[name] == MISSING_REDSHIFT] = np.nan
+    redshift_table = pd.DataFrame({"objectId": object_id, **redshifts})
+    return lightcurves, objects, redshift_table
 
 
 def model_pairs(model_dir):
@@ -183,12 +226,14 @@ def find_dump(model_dir):
 # Read every pair of every model and write the two Parquet files.
 def run(model_dirs, out_dir, max_pairs=None):
     out_dir.mkdir(parents=True, exist_ok=True)  # make the output folder if needed
-    lc_path = out_dir / "lightcurves.parquet"
-    obj_path = out_dir / "objects.parquet"
+    lc_path = out_dir / "lightcurves_elasticc.parquet"
+    obj_path = out_dir / "objects_elasticc.parquet"
+    z_path = out_dir / "redshifts_elasticc.parquet"
 
     # Writers add one pair at a time, so all 70 million rows never sit in memory at once.
     lc_writer = pq.ParquetWriter(lc_path, LIGHTCURVE_SCHEMA)
     obj_writer = pq.ParquetWriter(obj_path, OBJECT_SCHEMA)
+    z_writer = pq.ParquetWriter(z_path, REDSHIFT_SCHEMA)
     n_points = n_objects = 0  # running totals for the summary at the end
     try:
         for model_dir in model_dirs:
@@ -200,12 +245,15 @@ def run(model_dirs, out_dir, max_pairs=None):
                   f"{len(gentype_by_cid)} objects in DUMP", flush=True)
 
             for head_path, phot_path in pairs:
-                lightcurves, objects = read_pair(head_path, phot_path, true_class, gentype_by_cid)
+                lightcurves, objects, redshifts = read_pair(
+                    head_path, phot_path, true_class, gentype_by_cid)
                 # Append this pair to the end of each file.
                 lc_writer.write_table(pa.Table.from_pandas(
                     lightcurves, schema=LIGHTCURVE_SCHEMA, preserve_index=False))
                 obj_writer.write_table(pa.Table.from_pandas(
                     objects, schema=OBJECT_SCHEMA, preserve_index=False))
+                z_writer.write_table(pa.Table.from_pandas(
+                    redshifts, schema=REDSHIFT_SCHEMA, preserve_index=False))
                 n_points += len(lightcurves)
                 n_objects += len(objects)
                 print(f"  {head_path.name}: {len(objects)} objects, "
@@ -214,9 +262,11 @@ def run(model_dirs, out_dir, max_pairs=None):
         # Always close, even after an error, or the Parquet files are left broken.
         lc_writer.close()
         obj_writer.close()
+        z_writer.close()
 
     print(f"\nSaved {n_points} points to {lc_path}")
     print(f"Saved {n_objects} objects to {obj_path}")
+    print(f"Saved {n_objects} redshift rows to {z_path}")
 
 
 def main():

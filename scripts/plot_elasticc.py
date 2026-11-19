@@ -19,8 +19,8 @@ OUT_DIR = FIGS  # where the PNGs go
 # Days to show before the first and after the last detection; None shows the whole survey.
 ZOOM_DAYS = (50, 150)
 
-# Small table, one row per object: objectId, ebv, trueClass.
-objects = pd.read_parquet(INTERIM / "objects.parquet")
+# Small table, one row per object. trueClass lives here, not on the light curve.
+objects = pd.read_parquet(INTERIM / "objects_elasticc.parquet")
 if MODE == "ids":
     picks = objects[objects["objectId"].isin(OBJECT_IDS)]  # only the ids I listed
 elif MODE == "class":
@@ -33,7 +33,7 @@ if picks.empty:
 
 ids = picks["objectId"].tolist()
 # The light-curve file is 1.6 GB, so only load the rows for the picked objects.
-lc = pd.read_parquet(INTERIM / "lightcurves.parquet",
+lc = pd.read_parquet(INTERIM / "lightcurves_elasticc.parquet",
                      filters=[("objectId", "in", ids)])
 
 OUT_DIR.mkdir(exist_ok=True)  # make the plot folder if it is not there yet

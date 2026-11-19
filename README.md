@@ -1,36 +1,28 @@
 Photometric supernova classifier for early LSST alerts. Real objects come from the Lasair broker, with TNS spectroscopic types where they exist, and the training set is simulated ELAsTiCC2 light curves. Both are turned into one shared table of flux versus time so a classifier can be trained on the simulations and tested on the real alerts.
 
-Create the environment from the repository root, then activate it:
+The training data are simulated light curves (ELAsTiCC). The test data are real LSST alerts from Lasair. A TNS spectrum gives the true type when one exists.
+
+From this folder:
 
 ```
 conda env create -f environment.yml
 conda activate lsst-sn
 ```
 
-The Lasair API token lives in `scripts/settings.py` as `API_TOKEN`. That file is gitignored. Do not commit it.
 
-```
-lsst-early-sn-classifier/
-├── scripts/            # all code, flat; paths come from paths.py
-├── data/raw/           # downloads, never edited (gitignored)
-├── data/interim/       # light curves in the shared table format (gitignored)
-├── data/processed/     # day-N tables for models (gitignored)
-├── results/figures/    # plots
-├── results/tables/     # result tables
-├── models/             # trained models (gitignored)
-├── notebooks/          # exploration only
-├── literature/         # paper PDFs (gitignored)
-└── logbook/            # lab notes
-```
+## Scripts
 
-Run every script from the repository root.
+- `download_docs.py` downloads the simulated light curves. Data: ELAsTiCC files from NERSC.
+- `elasticc_reader.py` turns those files into one light-curve table and one object table. Data: ELAsTiCC FITS files.
+- `lasair_phase1.py` gets a list of supernova candidates, and a list of objects that already have a spectrum type. Data: Lasair, over the web.
+- `tns_only_query.py` gets every Lasair object that has a TNS type. Data: Lasair, over the web.
+- `fetch_lightcurves.py` downloads the light curve for each object in that list. Data: Lasair, over the web.
+- `lasair_reader.py` turns the downloaded Lasair objects into the same kind of tables as the simulations. Data: saved Lasair JSON files.
+- `plot_elasticc.py` plots a few simulated light curves. Data: ELAsTiCC tables.
+- `plot_lasair.py` plots a few real light curves. Data: Lasair tables.
+- `light_curves.py` plots one real object, and the same object cut at night 0, 2 and 5. Data: one Lasair JSON file and the Lasair table.
+- `sherlock_check.py` checks how often Sherlock is right, using the spectrum types as the truth. Data: the TNS-labelled list.
+- `labels.py` says whether a class counts as a supernova. Other scripts import this. Data: ELAsTiCC model names and TNS types.
+- `truncate.py` cuts a light curve at the end of night N after the first detection. Data: one light-curve table.
 
-- `python scripts/lasair_phase1.py` — queries Lasair for cleaned supernova candidates and for TNS-labelled objects, and can download one full object record. This calls the Lasair API.
-- `python scripts/tns_only_query.py` — queries every Lasair object that has a TNS type and writes `tns_all.csv`. This calls the Lasair API.
-- `python scripts/fetch_lightcurves.py` — downloads the full record, including the light curve, for each object in `tns_all.csv`. This calls the Lasair API.
-- `python scripts/sherlock_check.py` — scores Sherlock's completeness, purity, and rejection against the TNS labels, and writes `sherlock_performance.csv`.
-- `python scripts/light_curves.py` — plots one Lasair light curve from the saved object JSON. Set `OBJECT_ID` at the top of the script. It calls the API only when that JSON is not already on disk.
-- `python scripts/download_docs.py` — downloads the selected ELAsTiCC2 training folders from NERSC into `data/raw/elasticc2`.
-- `python scripts/elasticc_reader.py` — reads the ELAsTiCC2 HEAD, PHOT, and DUMP files and writes `lightcurves.parquet` and `objects.parquet` into `data/interim`. The full run is large; `--max-pairs 1` reads only the first file pair of each model.
-- `python scripts/plot_elasticc.py` — plots a few ELAsTiCC2 light curves from the interim parquet tables.
-- `scripts/paths.py` — defines every folder path. Scripts import it; it is not run on its own.
+- `paths.py` holds the folder paths. Other scripts import this. Data: none.

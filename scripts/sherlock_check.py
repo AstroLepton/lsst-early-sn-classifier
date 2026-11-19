@@ -19,6 +19,7 @@ ORPHAN - no nucleus or transient (included in case too faint to be detected)
 
 import numpy as np  # square roots for the uncertainty
 import pandas as pd  # read the labelled table and write the results
+from labels import broad_class  # SN / not SN, shared with the ELAsTiCC labels
 from paths import RAW, TABLES
 
 # Which Sherlock classes count as "keep" in each cut we compare.
@@ -27,21 +28,6 @@ KEEP_CUTS = {
     "SN + NT": {"SN", "NT"},
     "SN + NT + ORPHAN": {"SN", "NT", "ORPHAN"},
 }
-
-# TNS types that don't say what the transient is, so they can't be used as truth.
-UNUSABLE_TYPES = {"Other", "Galaxy"}
-
-
-def broad_class(tns_type):
-    # Turn a detailed TNS type into 'SN', 'not SN', or None (leave out).
-    if pd.isna(tns_type):
-        return None  # blank cell
-    t = str(tns_type).strip()
-    if t == "" or "?" in t or t in UNUSABLE_TYPES:
-        return None  # missing or uncertain label
-    if t.startswith("SN") or t.startswith("SLSN"):
-        return "SN"  # SN Ia, SN II, SN Ic-BL, SLSN-I, ...
-    return "not SN"  # TDE, AGN, CV, Nova, Varstar, Impostor-SN, ...
 
 
 def fraction(k, n, z=1.0):  # k successes out of n trials; z=1 is about 68%
